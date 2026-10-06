@@ -1,0 +1,70 @@
+{
+  "app": {
+    "name": "DataMonitor",
+    "version": "v2.0.3"
+  },
+  "sources": {
+    "primary": {
+      "type": "sina",
+      "code": "gds_AUTD",
+      "name": "黄金延期(Au(T+D))",
+      "unit": "元/克"
+    },
+    "reference": {
+      "type": "fx_implied",
+      "gold_code": "hf_XAU",
+      "fx_code": "USDCNY",
+      "note": "伦敦金(美元/盎司)÷31.1035×美元人民币汇率，推算的国内理论价，仅用于合理性校验"
+    },
+    "fallback": {
+      "type": "cngold",
+      "enabled": false,
+      "url": "https://quote.cngold.org/gjs/gjhj_xhhj.html?key=au",
+      "xpath": {
+        "现货黄金 买价": "/html/body/div[3]/div[2]/div[2]/div[1]/div[1]/ul/li[1]/em",
+        "现货黄金 卖价": "/html/body/div[3]/div[2]/div[2]/div[1]/div[1]/ul/li[2]/em",
+        "现货黄金 今日最高": "/html/body/div[3]/div[2]/div[2]/div[1]/div[1]/ul/li[5]/em",
+        "现货黄金 今日最低": "/html/body/div[3]/div[2]/div[2]/div[1]/div[1]/ul/li[6]/em"
+      }
+    }
+  },
+  "cross_check": {
+    "enabled": true,
+    "tolerance_pct": 2.5
+  },
+  "alert": {
+    "mode": "high_low",
+    "cooldown_seconds": 300,
+    "price_tolerance": 0.01,
+    "buy_below": null,
+    "sell_above": null
+  },
+  "schedule": {
+    "trading_interval_seconds": 15,
+    "off_hours_interval_seconds": 180,
+    "closed_interval_seconds": 1800,
+    "day_sessions": [["09:00", "11:30"], ["13:30", "15:30"]],
+    "night_session": ["20:00", "02:30"],
+    "use_cn_calendar": true,
+    "holidays": []
+  },
+  "notify": {
+    "qq": {
+      "enabled": true,
+      "_warning": "第三方协议端(OneBot/NapCat)存在封号风险：请使用小号、HTTP 服务仅监听 127.0.0.1、务必设置强 access_token、保持低发送频率",
+      "_usage": "先在 NapCat/LLOneBot 中开启 OneBot v11 HTTP 服务，再把 api_base 与 access_token 填到此处，并将目标群号/好友QQ号填入 targets",
+      "api_base": "http://127.0.0.1:3000",
+      "access_token": "记得填你自己的token哦",
+      "timeout_seconds": 10,
+      "rate_limit_per_minute": 20,
+      "targets": {
+        "groups": ["你想通知的QQ群号"],
+        "users": ["你想通知的QQ号"]
+      }
+    }
+  },
+  "runtime": {
+    "state_file": "state.json",
+    "log_file": "monitor.log"
+  }
+}
