@@ -1,6 +1,6 @@
-# DataMonitor — 金价提醒小工具
+# DataMonitor — 数据提醒小工具
 
-自动盯着国内金价，一旦创出当天新高或新低，就通过 QQ 给你发提醒。
+自动盯着设定数据（国内金价），一旦达到设定目标，就通过通信软件（QQ）给你发提醒。
 
 版本 `v2.0.3` ｜ 运行环境 Python 3.13 ｜ 依赖 `requests`、`chinesecalendar（用于获取交易日）`
 
@@ -69,7 +69,7 @@
 | 提醒冷却时间 | `alert.cooldown_seconds`（默认 300 秒） |
 | 各时段查询频率 | `schedule.*` |
 
-其余字段含义见 [开发者笔记](docs/开发者笔记.md)。
+其余字段含义见 [DEV_NOTES.md](docs/DEV_NOTES.md)。
 
 ---
 
@@ -90,3 +90,13 @@
 
 - [DEV_NOTES.md](docs/DEV_NOTES.md) — 目录结构、数据流、配置全表、设计说明
 - [NapCat 部署教程](docs/NapCat部署教程.md) — 协议端部署与常见问题
+
+---
+
+## 许可证
+
+本项目基于 [GNU AGPL-3.0](LICENSE) 许可证开源。
+
+Copyright (C) 2026 [DopeLiu](https://github.com/DopeLiu)
+
+您可以自由地使用、学习和修改本项目，但再分发时须同样采用 AGPL-3.0 协议并保留版权声明；若将修改后的版本部署为网络服务对外提供，也必须向使用者公开其完整源代码。
