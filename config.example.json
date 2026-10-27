@@ -41,9 +41,8 @@
   },
   "schedule": {
     "trading_interval_seconds": 15,
-    "off_hours_interval_seconds": 180,
-    "closed_interval_seconds": 1800,
     "day_sessions": [["09:00", "11:30"], ["13:30", "15:30"]],
+    "_night_session_note": "夜盘行情存在，但本工具只监控日盘；此项仅供交易日历与状态展示",
     "night_session": ["20:00", "02:30"],
     "use_cn_calendar": true,
     "holidays": []

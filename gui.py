@@ -3,9 +3,9 @@
 
 布局：
     顶部 —— 应用名 / 版本 / 状态徽标 / 监控开关
-    左侧 —— 关键指标卡（最新价、涨跌幅、今日最高、今日最低）+ 数据质量卡
+    左侧 —— 关键指标卡（最新价、涨跌幅、监控最高、监控最低）+ 数据质量卡
     右侧 —— 运行日志（按级别着色，自动换行并续行缩进，自动滚动）
-    底部 —— 今日交易日 / 市场状态 / 轮询间隔 / QQ 通道状态
+    底部 —— 今日交易日 / 市场状态 / 轮询状态 / QQ 通道状态
 
 启动状态：
     界面启动时监控**默认关闭**（不自动取数、不推送），需用户打开右上角
@@ -195,7 +195,7 @@ class MonitorApp:
         self.metric_labels = {}
         metrics = [
             ("price", "最新价（元/克）"), ("change_pct", "涨跌幅"),
-            ("high", "今日最高"), ("low", "今日最低"),
+            ("high", "监控最高"), ("low", "监控最低"),
         ]
         for index, (key, caption) in enumerate(metrics):
             card = tk.Frame(left, bg=COLOR_CARD_BG)
@@ -290,8 +290,9 @@ class MonitorApp:
             color = COLOR_TEXT
         self.metric_labels["change_pct"].config(text=f"{pct:+.2f}%", fg=color)
 
-        self.metric_labels["high"].config(text=f"{data['high']:.2f}")
-        self.metric_labels["low"].config(text=f"{data['low']:.2f}")
+        # 展示本工具实际监控到的极值，不用数据源的 high/low（该字段可能失真）
+        self.metric_labels["high"].config(text=f"{data.get('range_high', data['price']):.2f}")
+        self.metric_labels["low"].config(text=f"{data.get('range_low', data['price']):.2f}")
 
         self.quality_labels["source"].config(text=data.get("source", "--"))
         if data.get("cross_ok") is False:
@@ -334,7 +335,10 @@ class MonitorApp:
         engine = self.engine
         if engine.next_poll_at:
             remain = max(0, int(engine.next_poll_at - time.time()))
-            self.quality_labels["next"].config(text=f"{remain}s 后")
+            if engine.current_interval:      # 监控时段内
+                self.quality_labels["next"].config(text=f"{remain}s 后")
+            else:                            # 已暂停，等待下一个开盘
+                self.quality_labels["next"].config(text=f"距开盘 {remain // 60} 分")
         elif engine.is_running:
             self.quality_labels["next"].config(text="取数中…")
         else:
@@ -347,13 +351,13 @@ class MonitorApp:
         if not engine.is_running:
             market, interval = "已暂停", "--"
         else:
-            if trading_calendar.is_market_open(datetime.now(), schedule):
-                market = "开市"
+            if trading_calendar.is_monitor_window(datetime.now(), schedule):
+                market = "监控中"
             elif trading_calendar.is_trading_day(today, schedule):
-                market = "交易时段外"
+                market = "非监控时段"
             else:
                 market = "休市"
-            interval = f"{engine.current_interval}s" if engine.current_interval else "--"
+            interval = f"{engine.current_interval}s" if engine.current_interval else "暂停"
 
         self.bottom_label.config(
             text=f"今日交易日：{trading}    ｜    市场状态：{market}    ｜    "

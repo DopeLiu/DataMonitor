@@ -10,6 +10,10 @@
              法定节假日前一晚不设夜盘（如上金所公告「节前一日晚上不进行夜市交易」）。
 - 交易日 = 周一至周五 且 非法定节假日（调休上班的周末交易所同样休市）。
 
+监控窗口 vs 市场开市：
+- `is_market_open` 描述市场真实状态（含夜盘），用于界面展示；
+- `is_monitor_window` 描述本工具是否在工作，只认日盘。夜盘不取数、不判定。
+
 节假日来源（任一判定为节假日即为节假日）：
 1. config.schedule.holidays：自定义日期列表，形如 ["2026-10-01", ...]
 2. chinese_calendar 库：自动识别法定节假日与调休，覆盖 2004-2026；
@@ -131,3 +135,46 @@ def is_market_open(now, schedule):
         if current <= end:    # 次日 02:30 之前（承接前一日夜盘）
             return is_trading_day(day - one_day, schedule) and not is_statutory_holiday(day, schedule)
     return False
+
+
+def is_monitor_window(now, schedule):
+    """当前是否处于监控窗口内：仅日盘，不含夜盘。
+
+    夜盘行情照常存在，但本工具只在日盘取数，其余时间完全暂停。
+    """
+    if not is_trading_day(now.date(), schedule):
+        return False
+    current = now.time()
+    for start_str, end_str in schedule.get("day_sessions", []):
+        if _parse(start_str) <= current <= _parse(end_str):
+            return True
+    return False
+
+
+def seconds_to_next_open(now, schedule):
+    """距下一个监控窗口开始的秒数。
+
+    午休返回当天 13:30 之前的剩余秒数；收盘后返回下一个交易日 09:00 之前的
+    剩余秒数。已在窗口内时返回 1（调用方本不应在窗口内调用）。
+    """
+    if is_monitor_window(now, schedule):
+        return 1
+
+    starts = [_parse(start) for start, _ in schedule.get("day_sessions", [])]
+    if not starts:
+        starts = [datetime.time(9, 0)]
+
+    # 当天还没开始，或正处午休：等当前交易日的下一个时段
+    if is_trading_day(now.date(), schedule):
+        for start in starts:
+            if now.time() < start:
+                target = datetime.datetime.combine(now.date(), start)
+                return max(int((target - now).total_seconds()), 1)
+
+    # 收盘后 / 周末 / 节假日：向后找最近的交易日
+    for offset in range(1, 16):
+        day = now.date() + datetime.timedelta(days=offset)
+        if is_trading_day(day, schedule):
+            target = datetime.datetime.combine(day, starts[0])
+            return max(int((target - now).total_seconds()), 1)
+    return 3600  # 兜底：极端情况下 1 小时后重试

@@ -4,8 +4,10 @@
 对外接口：
     MonitorEngine(config, state_path, on_data=None, on_state=None)
         .start() / .stop() / .is_running
-        .next_interval(now=None)   按市场状态返回下一次轮询间隔
+        .next_interval(now=None)   距下一次唤醒的秒数（非监控时段为距开盘）
         .current_interval / .next_poll_at   供界面显示倒计时
+
+监控只在日盘进行：非监控时段不取数、不判定、不推送，直接睡到下一个开盘时刻。
 
 线程模型：start() 在后端线程运行循环，GUI 需把 on_data/on_state 回调
 仅用于向线程安全队列投递消息，不得直接操作控件。
@@ -62,6 +64,14 @@ def setup_logging(log_file, console=True):
     return logger
 
 
+def _human_wait(seconds):
+    """把秒数转成便于阅读的等待时长。"""
+    seconds = max(int(seconds), 1)
+    if seconds >= 3600:
+        return f"{seconds // 3600} 小时 {seconds % 3600 // 60} 分"
+    return f"{max(seconds // 60, 1)} 分钟"
+
+
 class MonitorEngine:
     """金价监控循环，支持随时启停。"""
 
@@ -75,7 +85,6 @@ class MonitorEngine:
         self._thread = None
         self._stop_event = threading.Event()
         self._state = trigger.load_state(state_path)
-        self._first_run = True
 
         self.current_interval = None
         self.next_poll_at = None
@@ -109,19 +118,31 @@ class MonitorEngine:
 
     # ------------------------------------------------------------------ #
     def next_interval(self, now=None):
-        """按市场状态选择轮询间隔：开市 / 交易日的非交易时段 / 休市日。"""
+        """距下一次唤醒的秒数：监控时段内按配置间隔，其余等到下一个开盘。"""
         schedule = self.config["schedule"]
         now = now or datetime.now()
-        if trading_calendar.is_market_open(now, schedule):
+        if trading_calendar.is_monitor_window(now, schedule):
             return schedule["trading_interval_seconds"]
-        if trading_calendar.is_trading_day(now.date(), schedule):
-            return schedule["off_hours_interval_seconds"]
-        return schedule.get("closed_interval_seconds", 1800)
+        return trading_calendar.seconds_to_next_open(now, schedule)
 
     def _run(self):
         log.info("%s %s 监控已启动", self.app_name, self.version)
         try:
+            self._notify_startup()
             while not self._stop_event.is_set():
+                now = datetime.now()
+                schedule = self.config["schedule"]
+
+                # 非监控时段：不取数，直接睡到下一个开盘
+                if not trading_calendar.is_monitor_window(now, schedule):
+                    wait_seconds = trading_calendar.seconds_to_next_open(now, schedule)
+                    self.current_interval = None
+                    self.next_poll_at = time.time() + wait_seconds
+                    log.info("非监控时段，暂停检测，约 %s 后开盘", _human_wait(wait_seconds))
+                    if self._stop_event.wait(wait_seconds):
+                        break
+                    continue
+
                 started = time.time()
                 self._cycle()
                 interval = self.next_interval()
@@ -138,14 +159,17 @@ class MonitorEngine:
             self.current_interval = None
             log.info("监控已停止")
 
+    def _notify_startup(self):
+        """启动通知：开市时附带一次实时价，非监控时段不取数。"""
+        schedule = self.config["schedule"]
+        data = None
+        if trading_calendar.is_monitor_window(datetime.now(), schedule):
+            data = collector.fetch_all(self.config)
+        notifier.notify_startup(data, self.config, self.version)
+
     def _cycle(self):
         """执行一轮：取数 -> 触发 -> 推送。"""
         data = collector.fetch_all(self.config)
-
-        if self._first_run:
-            notifier.notify_startup(data, self.config, self.version)
-            self._first_run = False
-
         if not data:
             log.warning("本轮取数失败，跳过")
             return
@@ -153,15 +177,22 @@ class MonitorEngine:
         alerts = trigger.evaluate(data, self._state, self.config)
         trigger.save_state(self._state, self.state_path)
 
-        if alerts:
-            for alert in alerts:
+        # 开盘播报与价格告警是两类消息，分开推送
+        openings = [a for a in alerts if a["type"] == "open"]
+        price_alerts = [a for a in alerts if a["type"] != "open"]
+
+        if openings:
+            notifier.notify_opening(data, self.config)
+        if price_alerts:
+            for alert in price_alerts:
                 log.info("告警: %s 价格=%.2f", alert["label"], alert["price"])
-            notifier.notify(alerts, data, self.config)
-        else:
+            notifier.notify(price_alerts, data, self.config)
+        if not alerts:
             flag = "" if data.get("cross_ok", True) else " [数据源不一致]"
             log.info(
-                "最新=%.2f 高=%.2f 低=%.2f 无告警%s",
-                data["price"], data["high"], data["low"], flag,
+                "最新=%.2f 监控高=%.2f 监控低=%.2f 无告警%s",
+                data["price"], data.get("range_high", data["price"]),
+                data.get("range_low", data["price"]), flag,
             )
 
         if self.on_data:

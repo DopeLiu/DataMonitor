@@ -126,12 +126,15 @@ def _cross_text(data):
 
 def _alert_fields(alerts, data):
     unit = data.get("unit", "元/克")
+    # 高/低用本工具实际监控到的值，不展示数据源的 high/low（该字段可能失真）
+    range_high = data.get("range_high", data["price"])
+    range_low = data.get("range_low", data["price"])
     return [
         ("时间", datetime.now().strftime("%Y.%m.%d %H:%M:%S")),
         ("触发", "、".join(a["label"] for a in alerts)),
         ("最新价", f"{data['price']:.2f} {unit}"),
         ("今开/昨收", f"{data['open']:.2f} / {data['prev_close']:.2f}"),
-        ("今日高/低", f"{data['high']:.2f} / {data['low']:.2f}"),
+        ("监控高/低", f"{range_high:.2f} / {range_low:.2f}"),
         ("涨跌幅", f"{data['change_pct']:+.2f}%"),
         ("数据源", f"{data['source']} ｜ 校验：{_cross_text(data)}"),
     ]
@@ -142,14 +145,27 @@ def build_message(alerts, data, style="text"):
     return _render("金价提醒", _alert_fields(alerts, data), style)
 
 
+def build_opening_message(data, style="text"):
+    """组装开盘播报消息，与「创新高/新低」告警完全分开。"""
+    unit = data.get("unit", "元/克")
+    fields = [
+        ("时间", datetime.now().strftime("%Y.%m.%d %H:%M:%S")),
+        ("最新价", f"{data['price']:.2f} {unit}"),
+        ("昨收", f"{data['prev_close']:.2f} {unit}"),
+        ("涨跌幅", f"{data['change_pct']:+.2f}%"),
+        ("数据源", f"{data['source']} ｜ 校验：{_cross_text(data)}"),
+    ]
+    return _render("今日开盘", fields, style)
+
+
+
 def _startup_fields(data, config, version, pid):
     schedule = config.get("schedule", {})
     alert_cfg = config.get("alert", {})
     primary = config["sources"]["primary"]
     unit = primary.get("unit", "元/克")
     day_sessions = " / ".join(f"{s}-{e}" for s, e in schedule.get("day_sessions", []))
-    night = schedule.get("night_session")
-    sessions = day_sessions + (f" ｜ 夜盘 {night[0]}-次日{night[1]}" if night else "")
+    sessions = f"{day_sessions}（夜盘不监控）"
     today = datetime.now().date()
 
     fields = [
@@ -157,9 +173,8 @@ def _startup_fields(data, config, version, pid):
         ("程序版本", f"DataMonitor {version} ｜ Python {platform.python_version()} ｜ PID {pid}"),
         ("监控标的", f"{primary.get('name', primary.get('code'))} {unit}"),
         ("轮询频率",
-         f"开市 {schedule.get('trading_interval_seconds')}s / "
-         f"盘中休整 {schedule.get('off_hours_interval_seconds')}s / "
-         f"休市日 {schedule.get('closed_interval_seconds', 1800)}s ｜ "
+         f"开市 {schedule.get('trading_interval_seconds')}s ｜ "
+         f"非交易时段暂停检测 ｜ "
          f"告警冷却 {alert_cfg.get('cooldown_seconds')}s"),
         ("交易时段", sessions),
         ("今日交易日", trading_calendar.day_status_text(today, schedule)),
@@ -168,12 +183,14 @@ def _startup_fields(data, config, version, pid):
     if data:
         fields.append((
             "当前金价",
-            f"{data['price']:.2f} {unit}"
-            f"（高 {data['high']:.2f} / 低 {data['low']:.2f}，涨跌 {data['change_pct']:+.2f}%）",
+            f"{data['price']:.2f} {unit}（涨跌 {data['change_pct']:+.2f}%）",
         ))
         fields.append(("数据源", f"{data['source']} ｜ 校验：{_cross_text(data)}"))
-    else:
+    elif trading_calendar.is_monitor_window(datetime.now(), schedule):
         fields.append(("当前金价", "⚠ 本次启动取数失败，稍后重试"))
+        fields.append(("数据源", f"新浪财经({primary.get('code')}) ｜ 校验：未执行"))
+    else:
+        fields.append(("当前金价", "非监控时段（休市），开盘后开始检测"))
         fields.append(("数据源", f"新浪财经({primary.get('code')}) ｜ 校验：未执行"))
 
     fields.append(("通知渠道", channel_status(config)))
@@ -233,6 +250,11 @@ def notify(alerts, data, config):
     if not alerts:
         return False
     return _dispatch(build_message(alerts, data, "text"), config, "告警")
+
+
+def notify_opening(data, config):
+    """推送开盘播报。返回 True 表示发送成功。"""
+    return _dispatch(build_opening_message(data, "text"), config, "开盘播报")
 
 
 def notify_startup(data, config, version, pid=None):
