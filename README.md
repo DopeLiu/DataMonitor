@@ -2,7 +2,7 @@
 
 自动盯着设定数据（国内金价），一旦达到设定目标，就通过通信软件（QQ）给你发提醒。
 
-版本 `v2.0.3` ｜ 运行环境 Python 3.13 ｜ 依赖 `requests`、`chinesecalendar（用于获取交易日）`
+版本 `v2.0.4` ｜ 运行环境 Python 3.13 ｜ 依赖 `requests`、`chinesecalendar（用于获取交易日）`
 
 ---
 
