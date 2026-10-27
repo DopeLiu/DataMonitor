@@ -55,6 +55,39 @@ def _message_text(message):
     return ""
 
 
+def _read_chunked(rfile, limit=MAX_BODY):
+    """解析 chunked 请求体（http.server 不会自动解码）。
+
+    NapCat 的 HTTP Webhook 由 Node 发送，未显式设置 Content-Length 时使用
+    Transfer-Encoding: chunked，必须逐块读取，否则读到的长度恒为 0。
+    """
+    body = bytearray()
+    while True:
+        line = rfile.readline(64).strip()
+        if not line:
+            break
+        try:
+            size = int(line.split(b";")[0], 16)
+        except ValueError:
+            raise ValueError(f"chunked 长度非法：{line!r}") from None
+        if size == 0:                       # 结束块，读掉可能的 trailer
+            while True:
+                trailer = rfile.readline(256)
+                if trailer in (b"\r\n", b"\n", b""):
+                    break
+            break
+        chunk = rfile.read(size)
+        if len(chunk) != size:
+            raise ValueError("chunked 数据不完整")
+        body.extend(chunk)
+        if len(body) > limit:
+            raise ValueError(f"请求体过大：超过 {limit} 字节")
+        rfile.read(2)                       # 丢弃 chunk 末尾的 CRLF
+    if not body:
+        raise ValueError("chunked 请求体为空")
+    return bytes(body)
+
+
 class QueryServer:
     """接收 OneBot v11 上报并回复查询指令的本地 HTTP 服务。"""
 
@@ -65,7 +98,9 @@ class QueryServer:
         self.on_status = on_status        # callback() -> bool，用于展示监控运行状态
         self.enabled = bool(qcfg.get("enabled"))
         self.host = qcfg.get("listen_host") or "127.0.0.1"
-        self.port = int(qcfg.get("listen_port") or 3001)
+        port = qcfg.get("listen_port")
+        # 显式写 0 表示由系统分配空闲端口（测试用）；缺省才回落到 3001
+        self.port = 3001 if port is None else int(port)
         self.commands = set(qcfg.get("commands") or ["#查询金价"])
         self.token = qcfg.get("access_token") or ""
         self.cooldown = float(qcfg.get("reply_cooldown_seconds") or 0)
@@ -95,8 +130,9 @@ class QueryServer:
             target=self._httpd.serve_forever, name="qq-query", daemon=True
         )
         self._thread.start()
-        log.info("查询服务已启动：http://%s:%s ｜ 指令：%s",
-                 self.host, self.port, "、".join(sorted(self.commands)))
+        log.info("查询服务已启动：http://%s:%s ｜ 指令：%s ｜ 上报鉴权：%s",
+                 self.host, self.port, "、".join(sorted(self.commands)),
+                 "开启" if self.token else "关闭")
         return True
 
     def stop(self, timeout=5):
@@ -126,23 +162,43 @@ class QueryServer:
 
     def _on_post(self, handler):
         """接收上报：鉴权 -> 读 body -> 立即回执 -> 异步处理。"""
-        if not self._auth_ok(handler.headers.get("Authorization")):
+        auth = handler.headers.get("Authorization")
+        if not self._auth_ok(auth):
+            # 两侧 token 不一致是这块最常见的故障：把收到值打出来，省得反复猜
+            log.warning(
+                "上报鉴权失败：收到 %s，期望 Bearer ****%s",
+                auth or "（无 Authorization 头）", self.token[-4:],
+            )
             handler.send_error(401, "Unauthorized")
             return
         try:
-            length = int(handler.headers.get("Content-Length") or 0)
-            if length <= 0 or length > MAX_BODY:
-                handler.send_error(400, "Bad Length")
-                return
-            event = json.loads(handler.rfile.read(length).decode("utf-8"))
+            event = json.loads(self._read_body(handler).decode("utf-8"))
         except Exception as exc:  # noqa: BLE001
-            log.warning("上报内容解析失败: %s", exc)
+            # 解析失败时连同请求头一起记录：多半是上报格式与预期不符，便于定位
+            log.warning("上报解析失败: %s ｜ 请求头: %s", exc, dict(handler.headers))
             handler.send_error(400, "Bad Request")
             return
 
         handler.send_response(204)          # 先回执：取数耗时不能阻塞 NapCat
         handler.end_headers()
         threading.Thread(target=self._handle, args=(event,), daemon=True).start()
+
+    def _read_body(self, handler):
+        """读取请求体，兼容 Content-Length 与 chunked 两种传输方式。
+
+        NapCat 的 HTTP Webhook 由 Node 发送，未显式设置 Content-Length 时会使用
+        Transfer-Encoding: chunked —— 此时 Content-Length 为空，http.server 也不会
+        自动解码，必须自己逐块读取。早期版本只认 Content-Length，导致全部上报被
+        以 400 拒绝、NapCat 反复重试。
+        """
+        if "chunked" in (handler.headers.get("Transfer-Encoding") or "").lower():
+            return _read_chunked(handler.rfile)
+        length = int(handler.headers.get("Content-Length") or 0)
+        if length <= 0:
+            raise ValueError("请求体为空（既无 Content-Length，也不是 chunked）")
+        if length > MAX_BODY:
+            raise ValueError(f"请求体过大：{length} 字节")
+        return handler.rfile.read(length)
 
     def _auth_ok(self, header):
         """校验上报来源；未配置 access_token 时一律放行（端口仅监听 127.0.0.1）。"""
@@ -168,9 +224,12 @@ class QueryServer:
                 event.get("raw_message") or _message_text(event.get("message"))
             )
             if text not in self.commands:
+                if text.startswith("#"):    # 疑似指令却没命中，留痕便于排查错字/空格
+                    log.info("指令未匹配: %r ｜ 已配置: %s", text, sorted(self.commands))
                 return
 
             group_id = event.get("group_id") if msg_type == "group" else None
+            log.info("收到查询指令：群=%s 用户=%s", group_id or "-", user_id)
             if not self._debounce_ok(group_id, user_id):
                 return
             self._reply(group_id, user_id)

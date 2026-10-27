@@ -276,6 +276,7 @@ def run_qq_bot():
     """用 mock NapCat 与 mock 取数，验证查询服务的识别、路由与回复内容。"""
     import json
     import os
+    import socket
     import tempfile
     import threading
     import time as _time
@@ -423,6 +424,35 @@ def run_qq_bot():
                 })
                 assert "取数失败" in replies[0][1]["message"], replies[0][1]
                 print("✅ 38 取数失败时如实提示")
+
+            # NapCat 实际使用 chunked 传输（无 Content-Length），早期只认
+            # Content-Length 会把所有上报判成空请求并回 400，导致指令永不触发
+            with mock.patch.object(qq_bot.collector, "fetch_all", return_value=quote):
+                payload = json.dumps({
+                    "post_type": "message", "message_type": "private", "self_id": 10001,
+                    "user_id": 555, "raw_message": "#查询金价",
+                }, ensure_ascii=False).encode("utf-8")
+                chunked = b"%x\r\n%s\r\n0\r\n\r\n" % (len(payload), payload)
+                before = len(received)
+                sock = socket.create_connection(("127.0.0.1", bot.port), timeout=5)
+                sock.sendall(
+                    b"POST / HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                    b"Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n" + chunked
+                )
+                resp = b""
+                while True:
+                    part = sock.recv(4096)
+                    if not part:
+                        break
+                    resp += part
+                sock.close()
+                assert b"204" in resp.split(b"\r\n")[0], resp[:80]
+                deadline = _time.time() + 2
+                while len(received) - before < 1 and _time.time() < deadline:
+                    _time.sleep(0.05)
+                assert len(received) - before == 1, "chunked 上报应被正常处理"
+                assert received[-1][0].endswith("/send_private_msg"), received[-1][0]
+                print("✅ 39 chunked 上报（无 Content-Length）可正常接收")
         finally:
             bot.stop()
             napcat.shutdown()

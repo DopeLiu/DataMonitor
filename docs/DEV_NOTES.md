@@ -18,7 +18,7 @@ DataMonitor/
 ├─ trading_calendar.py   # 交易日历：交易日 / 日盘 / 夜盘 判定
 ├─ notifier.py           # 通知：QQ（OneBot v11）推送与消息模板
 ├─ qq_bot.py             # QQ 指令服务：接收 NapCat 上报，回复「#查询金价」
-├─ test.py               # 单元测试（38 组）
+├─ test.py               # 单元测试（39 组）
 ├─ config.json           # 全部配置（应用信息/数据源/告警/调度/通知）
 ├─ state.json            # 运行时生成的触发状态
 ├─ monitor.log           # 运行时生成的轮转日志
@@ -155,6 +155,7 @@ NapCat --HTTP POST（127.0.0.1:3001）--> qq_bot.QueryServer
 NapCat 以「HTTP 上报」把消息事件 POST 到本模块起的本地服务（默认 `127.0.0.1:3001`），识别到指令后实时取数并回复到事件所在会话。四项不可省的实现约束：
 
 - **先回 204 再异步处理**：取数需 1~3 秒，同步等待会触发 NapCat 上报超时重试，导致同一条指令被重复回复。回执与业务处理分离在 `_on_post` / `_handle` 两个方法。
+- **必须支持 chunked 传输**：NapCat 的 Webhook 由 Node 发送，未显式设置 `Content-Length` 时走 `Transfer-Encoding: chunked`。`http.server` 不会自动解码，只认 `Content-Length` 会把每一条上报都判成空请求并回 400，表现为「日志里只有 400、指令永不触发」。`_read_body()` 对两种传输方式都要处理，用例 39 锁定该行为。
 - **阈值只有一处口径**：`trigger.thresholds()` 与 `trigger.evaluate()` 共用 `_break_price()`，避免「显示涨破 908.21、实际 908.30 才响」这类展示与判定漂移。
 - **阈值按日校验**：`state.json` 的 `date` 不是当日时，旧极值会在下一轮日切被重置，因此消息只提示「今日尚未建立基准」，不展示过期数字。
 - **查询回复不占告警限流桶**：`push_qq_to()` 直接走 `_post_onebot()`，不经 `_dispatch()` 的 `rate_limit_per_minute`，否则群友连续查询会把真正的新高/新低告警挤掉。
@@ -278,6 +279,6 @@ python tools/make_appicon.py [源图路径]
 # 运行监控（图形界面；启动后监控默认暂停，需手动打开右上角开关）
 .venv/Scripts/python.exe gui.py
 
-# 运行测试（38 组）
+# 运行测试（39 组）
 .venv/Scripts/python.exe test.py
 ```
