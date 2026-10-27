@@ -59,7 +59,7 @@
 
 ### 方式 A：WebUI 图形化配置（推荐）
 1. 浏览器打开 `http://127.0.0.1:6099/webui?token=你的token`。
-2. 进入 「网络配置」→ 「HTTP 服务器」→ 新建：
+2. 进入 「网络配置」→「对接应用端」→ 点「新增」→ 选 **HTTP 服务器**：
    | 字段 | 建议值 | 说明 |
    |---|---|---|
    | 名称 | `datamonitor` | 任意 |
@@ -96,7 +96,64 @@
 
 ---
 
-## 四、获取目标群号 / 好友 QQ 号
+## 四、开启 HTTP Webhook（让 QQ 能发指令查价）
+
+第三节的「HTTP 服务器」只解决**发消息**。要让机器人认识 `#查询金价`，还需要再开一个方向相反的通道——**HTTP Webhook**：由 NapCat 把收到的消息主动推给 DataMonitor。
+
+> **命名对照**：新版 WebUI 的「新增」菜单里叫 **HTTP Webhook**；旧版叫「HTTP 上报」或「HTTP 客户端」；配置文件中的键名是 `httpClients`。三者是同一个东西，不要和「HTTP SSE 服务器」混淆——SSE 由 NapCat 开端点、程序连上去长连接订阅，方向与实现都不同。
+
+两者是并列关系，**配了前者不代表后者生效**：
+
+| | HTTP 服务器 | HTTP Webhook |
+|---|---|---|
+| 谁发起连接 | DataMonitor → NapCat | NapCat → DataMonitor |
+| 作用 | 发消息 | 收消息 |
+| 端口 | `3000` | `3001` |
+
+### 方式 A：WebUI 配置（推荐）
+
+「网络配置」→「对接应用端」→ 点「新增」→ 选 **HTTP Webhook**：
+
+| 字段 | 建议值 | 说明 |
+|---|---|---|
+| 名称 | `datamonitor-query` | 任意 |
+| 启用 | ✅ 开启 | 不开启则发指令无响应 |
+| URL / 上报地址 | `http://127.0.0.1:3001` | 与 `config.json` 的 `query.listen_port` 一致 |
+| 消息格式 | `string` | `array` 也兼容 |
+| 上报自身消息 | **关闭** | 开启会把机器人自己的回复当成新消息上报，形成自问自答 |
+| Token | 留空 | 需要校验时，与 `query.access_token` 保持一致 |
+
+保存后日志应出现：
+
+```
+HTTP上报服务: http://127.0.0.1:3001, : 已启动
+```
+
+### 方式 B：直接改配置文件
+
+编辑 `config/onebot11_你的QQ号.json`，与 `httpServers` 并列增加：
+
+```json
+"httpClients": [{
+  "name": "datamonitor-query",
+  "enable": true,
+  "url": "http://127.0.0.1:3001",
+  "messagePostFormat": "string",
+  "reportSelfMessage": false,
+  "token": "",
+  "debug": false
+}]
+```
+
+改完重启 NapCat 生效。
+
+### 验证
+
+先启动 DataMonitor（`main.py` 或 `gui.py`），日志出现「查询服务已启动：http://127.0.0.1:3001」后，在 QQ 里给机器人发 `#查询金价`，应收到当前金价与告警阈值。
+
+---
+
+## 五、获取目标群号 / 好友 QQ 号
 
 **群号**：在 QQ 里打开目标群 → 群资料页可见群号；或调用 API 列出所有群：
 ```bash
@@ -111,7 +168,7 @@ curl -X POST http://127.0.0.1:3000/get_group_list \
 
 ---
 
-## 五、连通性验证（接入程序前先自测）
+## 六、连通性验证（接入程序前先自测）
 
 ### 1. curl 直接发一条群消息
 ```bash
@@ -149,7 +206,7 @@ python notifier.py
 
 ---
 
-## 六、常见问题
+## 七、常见问题
 
 | 现象 | 原因与解决 |
 |---|---|
@@ -158,10 +215,12 @@ python notifier.py
 | 连接被拒绝 | NapCat 未启动、HTTP 服务未开启、端口被占用或 `api_base` 地址写错 |
 | 机器人频繁掉线 | 换更稳定的小号；避免同号多端登录；降低发送频率；勿在机房 IP 登录 |
 | 消息发不出且无报错 | 机器人被移出群 / 未加好友 / 群号写错 |
+| 发 `#查询金价` 没反应 | ① HTTP Webhook 未开启；② 上报 URL 与 `query.listen_port` 不一致；③ DataMonitor 未运行（该端口由程序监听）。排查：看界面底部「查询服务」状态 → 看 `monitor.log` 有无「查询服务已启动」 |
+| 机器人对着自己的消息反复回复 | HTTP Webhook 的「上报自身消息」未关闭（`reportSelfMessage` 必须为 `false`） |
 
 ---
 
-## 七、长期稳定运行建议
+## 八、长期稳定运行建议
 
 - **Linux/Docker 更适合常驻**：Windows 上的登录窗口依赖图形界面，服务器上建议用 Docker 部署（见官方 `NapCat-Docker` 仓库的 README，镜像名与参数随版本变化，请以其当前推荐命令为准）。
 - **systemd / PM2 守护**：避免进程意外退出；NapCat-Docker 亦支持 `--restart=always`。
@@ -170,6 +229,6 @@ python notifier.py
 
 ---
 
-## 八、风险兜底
+## 九、风险兜底
 
 DataMonitor 的推送层与业务逻辑是解耦的：若 NapCat 这条通道日后不可用（封号、掉线等），只需在 `config.json` 中调整或新增通道配置（例如换成短信网关），**业务逻辑无需改动**。

@@ -20,6 +20,7 @@ from datetime import datetime
 import requests
 
 import trading_calendar
+import trigger
 
 log = logging.getLogger("datamonitor")
 
@@ -103,6 +104,44 @@ def push_qq(text, qq_cfg):
     return all_ok
 
 
+def push_qq_to(text, qq_cfg, group_id=None, user_id=None, at_user=None):
+    """向指定群/好友发送一条消息（被动回复用，不走 targets、不占告警限流）。
+
+    群聊且指定 at_user 时以 message 数组形式 @ 提问者，私聊发送纯文本。
+    """
+    base = (qq_cfg.get("api_base") or "").rstrip("/")
+    if not qq_cfg.get("enabled") or not base:
+        _warn_once("qq_reply_cfg", "QQ 通道未启用或未配置 api_base，无法回复查询")
+        return False
+
+    headers = {"Content-Type": "application/json"}
+    token = qq_cfg.get("access_token") or ""
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    timeout = qq_cfg.get("timeout_seconds", 10)
+
+    if group_id:
+        message = text
+        if at_user:
+            message = [
+                {"type": "at", "data": {"qq": at_user}},
+                {"type": "text", "data": {"text": "\n" + text}},
+            ]
+        return _post_onebot(
+            f"{base}/send_group_msg",
+            {"group_id": group_id, "message": message},
+            headers, timeout, f"群 {group_id}",
+        )
+    if user_id:
+        return _post_onebot(
+            f"{base}/send_private_msg",
+            {"user_id": user_id, "message": text},
+            headers, timeout, f"好友 {user_id}",
+        )
+    _warn_once("qq_reply_target", "查询回复缺少会话标识，跳过")
+    return False
+
+
 # --------------------------------------------------------------------------- #
 # 消息渲染
 # --------------------------------------------------------------------------- #
@@ -157,6 +196,80 @@ def build_opening_message(data, style="text"):
     ]
     return _render("今日开盘", fields, style)
 
+
+def _quote_time_text(data):
+    """行情时间；非当日数据额外标注，避免休市时的收盘价被当成实时价。"""
+    stamp = " ".join(x for x in (data.get("date"), data.get("time")) if x).strip()
+    if not stamp:
+        return datetime.now().strftime("%Y.%m.%d %H:%M:%S")
+    today = datetime.now().strftime("%Y-%m-%d")
+    if data.get("date") and data["date"] != today:
+        return f"{stamp}（上一交易日，当前休市）"
+    return stamp
+
+
+def _threshold_fields(state, config):
+    """触发阈值行。
+
+    只展示今日基准：日切未发生时旧极值会在下一轮重置，展示出来会误导。
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    recorded = (state or {}).get("date")
+    if recorded != today:
+        hint = f"（记录停留在 {recorded}）" if recorded else ""
+        return [("触发阈值", f"今日尚未建立基准{hint}")]
+
+    limits = trigger.thresholds(state, config)
+    if not limits:
+        return [("触发阈值", "今日尚未建立基准")]
+    return [
+        ("监控高/低", f"{limits['seen_high']:.2f} / {limits['seen_low']:.2f}"),
+        ("触发阈值", f"涨破 {limits['high']:.2f} 提醒 ｜ 跌破 {limits['low']:.2f} 提醒"),
+    ]
+
+
+def _status_text(config, running):
+    """市场状态；running 为 None 表示调用方不提供监控运行状态。"""
+    schedule = config.get("schedule", {})
+    parts = [trading_calendar.window_status_text(datetime.now(), schedule)]
+    if running is not None:
+        parts.append("监控运行中" if running else "监控已暂停")
+    return " · ".join(parts)
+
+
+def build_query_message(data, state, config, running=None, style="text"):
+    """组装「查询金价」回复：实时行情 + 当前告警阈值。
+
+    data 为 None 表示取数失败，只回一条提示，不编造价格。
+    """
+    if not data:
+        return _render("金价查询", [("结果", "取数失败，请稍后重试")], style)
+
+    unit = data.get("unit", "元/克")
+    alert_cfg = config.get("alert", {})
+    cooldown = alert_cfg.get("cooldown_seconds", 300)
+
+    fields = [
+        ("最新价", f"{data['price']:.2f} {unit}（{data['change_pct']:+.2f}%）"),
+        ("行情时间", _quote_time_text(data)),
+        ("今开/昨收", f"{data['open']:.2f} / {data['prev_close']:.2f}"),
+    ]
+    fields.extend(_threshold_fields(state, config))
+    fields.append(("告警冷却", f"同一方向 {cooldown} 秒内只提醒一次"))
+
+    buy_below = alert_cfg.get("buy_below")
+    sell_above = alert_cfg.get("sell_above")
+    if buy_below or sell_above:
+        prices = []
+        if buy_below:
+            prices.append(f"买入 {buy_below:.2f}")
+        if sell_above:
+            prices.append(f"卖出 {sell_above:.2f}")
+        fields.append(("自定义价位", " / ".join(prices)))
+
+    fields.append(("数据源", f"{data['source']}｜校验：{_cross_text(data)}"))
+    fields.append(("状态", _status_text(config, running)))
+    return _render("金价查询", fields, style)
 
 
 def _startup_fields(data, config, version, pid):

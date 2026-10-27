@@ -151,6 +151,32 @@ def is_monitor_window(now, schedule):
     return False
 
 
+def window_status_text(now, schedule):
+    """当前市场状态的中文描述，用于查询回复等需要「一句话说明」的场景。
+
+    比 day_status_text 更细：交易日再区分开盘前 / 交易中 / 午休 / 已收盘。
+    """
+    if is_monitor_window(now, schedule):
+        return "交易中"
+
+    day = now.date()
+    if not is_trading_day(day, schedule):
+        name = holiday_name(day, schedule)
+        if name:
+            return f"{name}休市"
+        return "周末休市" if day.weekday() >= 5 else "休市"
+
+    sessions = schedule.get("day_sessions") or []
+    if not sessions:
+        return "休市"
+    current = now.time()
+    if current < _parse(sessions[0][0]):
+        return "开盘前"
+    if current > _parse(sessions[-1][1]):
+        return "已收盘"
+    return "午休"
+
+
 def seconds_to_next_open(now, schedule):
     """距下一个监控窗口开始的秒数。
 

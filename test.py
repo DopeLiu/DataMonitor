@@ -272,6 +272,166 @@ def run_qq_channel():
     print("\n🎉 全部 QQ 通道测试通过")
 
 
+def run_qq_bot():
+    """用 mock NapCat 与 mock 取数，验证查询服务的识别、路由与回复内容。"""
+    import json
+    import os
+    import tempfile
+    import threading
+    import time as _time
+    import urllib.request
+    from datetime import datetime as _dt
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from unittest import mock
+
+    import qq_bot
+
+    received = []
+
+    class NapCat(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            received.append((self.path, json.loads(self.rfile.read(length) or b"{}")))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"status":"ok","retcode":0}')
+
+        def log_message(self, *args):   # 静音 HTTP 日志
+            pass
+
+    napcat = HTTPServer(("127.0.0.1", 0), NapCat)
+    threading.Thread(target=napcat.serve_forever, daemon=True).start()
+    napcat_port = napcat.server_address[1]
+
+    today = _dt.now().strftime("%Y-%m-%d")
+    quote = {
+        "price": 906.80, "open": 906.80, "prev_close": 905.90,
+        "high": 908.20, "low": 896.33, "change_pct": 0.10, "unit": "元/克",
+        "date": today, "time": "14:19:05", "source": "新浪财经(gds_AUTD)(测试)",
+        "cross_ok": True, "reference_price": 892.31, "deviation_pct": 1.62,
+    }
+    cfg = {
+        "alert": {"cooldown_seconds": 300, "price_tolerance": 0.01,
+                  "buy_below": None, "sell_above": None},
+        "schedule": {"day_sessions": [["09:00", "11:30"], ["13:30", "15:30"]]},
+        "notify": {"qq": {
+            "enabled": True, "api_base": f"http://127.0.0.1:{napcat_port}",
+            "access_token": "", "timeout_seconds": 5, "targets": {},
+        }},
+        "query": {"enabled": True, "listen_host": "127.0.0.1", "listen_port": 0,
+                  "commands": ["#查询金价"], "access_token": "",
+                  "reply_cooldown_seconds": 60},
+    }
+
+    def trigger(event, expect=1, settle=0.6):
+        """发送一条上报，返回 (HTTP 状态码, 期间收到的回复列表)。"""
+        before = len(received)
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{bot.port}/",
+            data=json.dumps(event).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            status = resp.status
+        deadline = _time.time() + settle
+        while len(received) - before < expect and _time.time() < deadline:
+            _time.sleep(0.05)
+        _time.sleep(0.05)
+        return status, received[before:]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        state_path = os.path.join(tmp, "state.json")
+        with open(state_path, "w", encoding="utf-8") as fp:
+            json.dump({"date": today, "seen_high": 908.20, "seen_low": 896.33,
+                       "last_high_alert_ts": 0, "last_low_alert_ts": 0}, fp)
+
+        bot = qq_bot.QueryServer(cfg, state_path, on_status=lambda: True)
+        assert bot.start() is True, "查询服务应启动成功"
+        try:
+            with mock.patch.object(qq_bot.collector, "fetch_all", return_value=quote):
+                # 群聊 @ 机器人后发指令
+                status, replies = trigger({
+                    "post_type": "message", "message_type": "group", "self_id": 10001,
+                    "group_id": 123456, "user_id": 654321,
+                    "raw_message": "[CQ:at,qq=10001] #查询金价",
+                })
+                assert status == 204, f"上报应先回 204 再异步处理: {status}"
+                assert len(replies) == 1, f"应回复一条: {replies}"
+                path, body = replies[0]
+                assert path.endswith("/send_group_msg"), path
+                assert body["group_id"] == 123456, body
+                assert isinstance(body["message"], list), "群回复应以数组形式 @ 提问者"
+                assert body["message"][0]["type"] == "at", body["message"]
+                assert body["message"][0]["data"]["qq"] == 654321, body["message"]
+                text = body["message"][1]["data"]["text"]
+                assert "906.80" in text and "涨破 908.21" in text \
+                    and "跌破 896.32" in text, text
+                print("✅ 32 群聊查询：@ 提问者并回复价格与阈值")
+
+                # 私聊指令
+                _, replies = trigger({
+                    "post_type": "message", "message_type": "private", "self_id": 10001,
+                    "user_id": 654321, "raw_message": "#查询金价",
+                })
+                path, body = replies[0]
+                assert path.endswith("/send_private_msg"), path
+                assert body["user_id"] == 654321 and isinstance(body["message"], str), body
+                print("✅ 33 私聊查询：直接回复纯文本")
+
+                # 非指令文本
+                _, replies = trigger({
+                    "post_type": "message", "message_type": "group", "self_id": 10001,
+                    "group_id": 123456, "user_id": 654321, "raw_message": "今天金价咋样",
+                }, expect=0)
+                assert replies == [], f"非指令不应回复: {replies}"
+                print("✅ 34 非指令消息不响应")
+
+                # 机器人自身消息（防自问自答）
+                _, replies = trigger({
+                    "post_type": "message", "message_type": "group", "self_id": 10001,
+                    "group_id": 123456, "user_id": 10001, "raw_message": "#查询金价",
+                }, expect=0)
+                assert replies == [], f"自身消息不应回复: {replies}"
+                print("✅ 35 机器人自身消息不响应")
+
+                # 冷却期内重复查询只回一次
+                trigger({"post_type": "message", "message_type": "private",
+                         "self_id": 10001, "user_id": 777, "raw_message": "#查询金价"})
+                _, replies = trigger({"post_type": "message", "message_type": "private",
+                                      "self_id": 10001, "user_id": 777,
+                                      "raw_message": "#查询金价"}, expect=0)
+                assert replies == [], f"冷却期内不应重复回复: {replies}"
+                print("✅ 36 冷却期内重复查询只回一次")
+
+                # 非当日 state：不得展示过期阈值
+                with open(state_path, "w", encoding="utf-8") as fp:
+                    json.dump({"date": "2026-01-01", "seen_high": 900,
+                               "seen_low": 890}, fp)
+                _, replies = trigger({
+                    "post_type": "message", "message_type": "private",
+                    "self_id": 10001, "user_id": 888, "raw_message": "#查询金价",
+                })
+                assert "今日尚未建立基准" in replies[0][1]["message"], replies[0][1]
+                print("✅ 37 非当日 state 不展示过期阈值")
+
+            # 取数失败：如实提示，不编造价格
+            with mock.patch.object(qq_bot.collector, "fetch_all", return_value=None):
+                _, replies = trigger({
+                    "post_type": "message", "message_type": "private",
+                    "self_id": 10001, "user_id": 999, "raw_message": "#查询金价",
+                })
+                assert "取数失败" in replies[0][1]["message"], replies[0][1]
+                print("✅ 38 取数失败时如实提示")
+        finally:
+            bot.stop()
+            napcat.shutdown()
+            napcat.server_close()
+
+    assert bot.is_running is False, "stop 后不应处于监听态"
+    print("\n🎉 全部 QQ 指令查询测试通过")
+
+
 def run_engine():
     """验证监控引擎的启停、回调与分档间隔（mock 取数，不依赖网络）。"""
     import os
@@ -475,6 +635,7 @@ if __name__ == "__main__":
     run()
     run_calendar()
     run_qq_channel()
+    run_qq_bot()
     run_engine()
     run_version()
     run_icon()

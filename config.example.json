@@ -62,6 +62,15 @@
       }
     }
   },
+  "query": {
+    "enabled": true,
+    "_usage": "在 QQ 里发送 commands 中的任一指令即回复当前金价与告警阈值；需在 NapCat「对接应用端」新增 HTTP Webhook（旧名 HTTP 上报/HTTP 客户端，键名 httpClients）指向 listen_host:listen_port，且 reportSelfMessage 必须关闭",
+    "listen_host": "127.0.0.1",
+    "listen_port": 3001,
+    "commands": ["#查询金价"],
+    "access_token": "",
+    "reply_cooldown_seconds": 10
+  },
   "runtime": {
     "state_file": "state.json",
     "log_file": "monitor.log"

@@ -5,6 +5,7 @@ import time
 from datetime import datetime
 
 import notifier
+import qq_bot
 import trading_calendar
 from monitor import (
     MonitorEngine,
@@ -36,6 +37,11 @@ def main():
     log.info("=" * 52)
 
     engine = MonitorEngine(config, state_path)
+    # 查询服务与监控循环解耦：关掉监控也能随时在 QQ 里查价
+    query_server = qq_bot.QueryServer(
+        config, state_path, on_status=lambda: engine.is_running
+    )
+    query_server.start()
     engine.start()
     try:
         while engine.is_running:
@@ -44,6 +50,7 @@ def main():
         pass
     finally:
         engine.stop()
+        query_server.stop()
         print("\n已停止监控。")
 
 

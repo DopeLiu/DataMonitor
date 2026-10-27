@@ -12,6 +12,7 @@
 
 import json
 import logging
+import os
 from datetime import datetime
 
 log = logging.getLogger("datamonitor")
@@ -32,9 +33,12 @@ def load_state(path):
 
 
 def save_state(state, path):
+    """原子写入：先写临时文件再替换，避免其它线程读到半截 JSON。"""
+    tmp = f"{path}.tmp"
     try:
-        with open(path, "w", encoding="utf-8") as fp:
+        with open(tmp, "w", encoding="utf-8") as fp:
             json.dump(state, fp, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
     except OSError as exc:
         log.error("写入状态文件失败: %s", exc)
 
@@ -44,6 +48,36 @@ def _round2(value, default=0.0):
         return round(float(value), 2)
     except (TypeError, ValueError):
         return default
+
+
+def _break_price(seen, tolerance, up=True):
+    """突破某个基准价所需的价格界线：涨破取 +，跌破取 -。
+
+    判定（evaluate）与阈值展示（thresholds）共用本函数，
+    避免两处口径漂移导致「显示涨破 908.21、实际 908.30 才响」。
+    """
+    return seen + tolerance if up else seen - tolerance
+
+
+def thresholds(state, config):
+    """当前触发阈值，返回 {seen_high, seen_low, high, low}；无有效基准返回 None。
+
+    注意：仅当 state 属于当日时才有意义，调用方需自行判断 state["date"]。
+    """
+    if not state or "seen_high" not in state or "seen_low" not in state:
+        return None
+    try:
+        seen_high = float(state["seen_high"])
+        seen_low = float(state["seen_low"])
+    except (TypeError, ValueError):
+        return None
+    tolerance = config.get("alert", {}).get("price_tolerance", 0.01)
+    return {
+        "seen_high": _round2(seen_high),
+        "seen_low": _round2(seen_low),
+        "high": _round2(_break_price(seen_high, tolerance)),
+        "low": _round2(_break_price(seen_low, tolerance, up=False)),
+    }
 
 
 def _in_open_notice_window(now, schedule):
@@ -102,14 +136,14 @@ def evaluate(data, state, config, now=None):
             alerts.append({"type": "open", "label": "今日开盘", "price": price})
 
     # 创当日新高：以最新价累计，不依赖数据源的最高字段
-    if price > state.get("seen_high", price) + tolerance:
+    if price > _break_price(state.get("seen_high", price), tolerance):
         state["seen_high"] = price
         if now_ts - state.get("last_high_alert_ts", 0) >= cooldown:
             state["last_high_alert_ts"] = now_ts
             alerts.append({"type": "high", "label": "创当日新高", "price": price})
 
     # 创当日新低
-    if price < state.get("seen_low", price) - tolerance:
+    if price < _break_price(state.get("seen_low", price), tolerance, up=False):
         state["seen_low"] = price
         if now_ts - state.get("last_low_alert_ts", 0) >= cooldown:
             state["last_low_alert_ts"] = now_ts

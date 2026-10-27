@@ -36,6 +36,7 @@ from datetime import datetime
 
 import appicon
 import notifier
+import qq_bot
 import trading_calendar
 from monitor import (
     LOGGER_NAME,
@@ -119,6 +120,12 @@ class MonitorApp:
 
         self._build_ui()
         self._attach_log_handler()
+
+        # 查询服务与监控开关解耦：配置启用即监听，关掉监控也能随时在 QQ 里查价
+        self.query_server = qq_bot.QueryServer(
+            config, self.state_path, on_status=lambda: self.engine.is_running
+        )
+        self.query_server.start()
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(200, self._drain_queue)
@@ -269,8 +276,17 @@ class MonitorApp:
     def _on_close(self):
         try:
             self.engine.stop()
+            self.query_server.stop()
         finally:
             self.root.destroy()
+
+    def _query_status(self):
+        """查询服务状态文案，供底部状态栏展示。"""
+        if not self.query_server.enabled:
+            return "未启用"
+        if self.query_server.is_running:
+            return f"{self.query_server.port} 监听中"
+        return "启动失败"
 
     def _set_state(self, running):
         if running:
@@ -361,7 +377,8 @@ class MonitorApp:
 
         self.bottom_label.config(
             text=f"今日交易日：{trading}    ｜    市场状态：{market}    ｜    "
-                 f"轮询间隔：{interval}    ｜    QQ 通道：{notifier.channel_status(self.config)}")
+                 f"轮询间隔：{interval}    ｜    QQ 通道：{notifier.channel_status(self.config)}    ｜    "
+                 f"查询服务：{self._query_status()}")
         self.root.after(1000, self._tick)
 
 
